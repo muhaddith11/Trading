@@ -9,11 +9,12 @@ from binance.exceptions import BinanceAPIException
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Kalitlar - NOTO'G'RI NOMLARNI TUZATISH
+# Kalitlar
 API_KEY = os.environ.get('BINANCE_API_KEY')
-API_SECRET = os.environ.get('BINANCE_API_SECRET')  # ✅ TO'G'RI NOM
+API_SECRET = os.environ.get('BINANCE_API_SECRET')
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
+PROXY_URL = os.environ.get('PROXY_URL', '')  # Ixtiyoriy proxy
 
 # Kalitlar bo'shmi yoki yo'qmi tekshirish
 if not all([API_KEY, API_SECRET, TELEGRAM_TOKEN, CHAT_ID]):
@@ -24,9 +25,20 @@ if not all([API_KEY, API_SECRET, TELEGRAM_TOKEN, CHAT_ID]):
     logger.error(f"CHAT_ID: {bool(CHAT_ID)}")
     exit(1)
 
-# Binance client'ni yaratish
+# Binance client'ni yaratish (proxy bilan)
 try:
-    client = Client(API_KEY, API_SECRET, requests_params={"timeout": 30})
+    requests_params = {"timeout": 30}
+    
+    # Agar proxy bo'lsa qo'shish
+    if PROXY_URL:
+        proxies = {
+            "http": PROXY_URL,
+            "https": PROXY_URL,
+        }
+        requests_params["proxies"] = proxies
+        logger.info(f"🌐 Proxy ishlatilmoqda: {PROXY_URL[:30]}...")
+    
+    client = Client(API_KEY, API_SECRET, requests_params=requests_params)
     logger.info("✅ Binance client ulanish muvaffaqiyatli")
 except BinanceAPIException as e:
     logger.error(f"❌ Binance API xatosi: {e}")
@@ -86,7 +98,7 @@ def check_signal():
 # Bot'ni ishga tushirish
 if __name__ == "__main__":
     logger.info("🚀 Trading bot ishga tushdi...")
-    send_telegram("🚀 Trading bot ishga tushdi!")
+    send_telegram("🚀 Trading bot ishga tushdi! (Binance + Proxy)")
     
     while True:
         try:
@@ -99,4 +111,3 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"❌ Loopda xato: {e}")
             time.sleep(60)  # Xato bo'lsa 1 minutdan keyin qayta urini
-    time.sleep(3600)  # Har 1 soatda
