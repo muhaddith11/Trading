@@ -296,7 +296,7 @@ def print_stats():
 
 def trading_loop():
     logger.info("🚀 Smart Money AI Futures Agent ishga tushdi!")
-    logger.info(f"📋 Tahlil qilinadigan coinlar: {len(SYMBOLS)} ta")
+    logger.info(f"📋 Har siklda TOP {TOP_N} volatile coin tahlil qilinadi")
     logger.info(f"💰 Har bir coin uchun: ${POSITION_SIZE} USDT | {LEVERAGE}x leverage")
 
     send_telegram(f"""
