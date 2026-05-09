@@ -3,7 +3,8 @@ import time
 import json
 import logging
 import requests
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
@@ -19,12 +20,12 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
 
-TOP_N = 20              # Eng volatile N ta coin
-POSITION_SIZE = 50      # Har bir coin uchun USDT
+TOP_N = 20
+POSITION_SIZE = 50
 LEVERAGE = 4
 STOP_LOSS_PERCENT = 2
 TAKE_PROFIT_PERCENT = 6
-CONFIDENCE_THRESHOLD = 65
+CONFIDENCE_THRESHOLD = 75  # 75%+ kerak
 
 if not all([API_KEY, API_SECRET, TELEGRAM_TOKEN, CHAT_ID, CLAUDE_API_KEY]):
     logger.error("❌ Environment variables to'liq emas!")
@@ -38,35 +39,140 @@ except Exception as e:
     exit(1)
 
 TRADES = []
-ACTIVE_POSITIONS = {}  # {symbol: position}
+ACTIVE_POSITIONS = {}
+BOT_RUNNING = True
+LAST_REPORT_DATE = None
+TELEGRAM_OFFSET = 0
 
+
+# ─── TELEGRAM ────────────────────────────────────────────────────────────────
+
+def send_telegram(msg, chat_id=None):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={
+            "chat_id": chat_id or CHAT_ID,
+            "text": msg,
+            "parse_mode": "HTML"
+        }, timeout=10)
+    except Exception as e:
+        logger.error(f"❌ Telegram xatosi: {e}")
+
+
+def get_telegram_updates():
+    global TELEGRAM_OFFSET
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+        resp = requests.get(url, params={"offset": TELEGRAM_OFFSET, "timeout": 5}, timeout=10)
+        if resp.status_code == 200:
+            return resp.json().get("result", [])
+    except Exception:
+        pass
+    return []
+
+
+def handle_command(text, chat_id):
+    text = text.strip().lower()
+
+    if text == "/status":
+        if not ACTIVE_POSITIONS:
+            send_telegram("📭 Hozir ochiq position yo'q", chat_id)
+        else:
+            msg = "📊 <b>Ochiq Positionlar:</b>\n" + "━" * 30 + "\n"
+            for sym, pos in ACTIVE_POSITIONS.items():
+                try:
+                    ticker = client.futures_symbol_ticker(symbol=sym)
+                    cur = float(ticker['price'])
+                    entry = pos['entry_price']
+                    if pos['type'] == 'SHORT':
+                        pnl_pct = ((entry - cur) / entry) * 100
+                    else:
+                        pnl_pct = ((cur - entry) / entry) * 100
+                    pnl_amt = pnl_pct * POSITION_SIZE / 100
+                    emoji = "🟢" if pnl_amt > 0 else "🔴"
+                    msg += f"{emoji} <b>{sym}</b> ({pos['type']})\n"
+                    msg += f"   Entry: ${entry:,.4f} → Hozir: ${cur:,.4f}\n"
+                    msg += f"   PnL: {pnl_pct:+.2f}% (${pnl_amt:+,.2f})\n\n"
+                except Exception:
+                    msg += f"📌 {sym} ({pos['type']}) - ma'lumot olib bo'lmadi\n\n"
+            send_telegram(msg, chat_id)
+
+    elif text == "/stats":
+        closed = [t for t in TRADES if t.get('status') == 'CLOSED']
+        if not closed:
+            send_telegram("📭 Hali yopilgan savdo yo'q", chat_id)
+        else:
+            wins = [t for t in closed if t['pnl'] > 0]
+            losses = [t for t in closed if t['pnl'] <= 0]
+            total_pnl = sum(t['pnl'] for t in closed)
+            win_rate = len(wins) / len(closed) * 100
+            msg = f"""📈 <b>Trading Statistika</b>
+{'━' * 30}
+📊 Jami savdolar: {len(closed)}
+✅ Wins: {len(wins)} | ❌ Losses: {len(losses)}
+🎯 Win Rate: {win_rate:.1f}%
+💰 Jami PnL: ${total_pnl:+,.2f}
+📌 Ochiq: {len(ACTIVE_POSITIONS)} position"""
+            send_telegram(msg, chat_id)
+
+    elif text == "/stop":
+        global BOT_RUNNING
+        BOT_RUNNING = False
+        send_telegram("🛑 Bot to'xtatilmoqda...", chat_id)
+
+    elif text == "/top":
+        symbols = get_volatile_symbols(TOP_N)
+        msg = f"🔥 <b>Hozirgi TOP {TOP_N} volatile coinlar:</b>\n\n"
+        msg += "\n".join([f"• {s}" for s in symbols])
+        send_telegram(msg, chat_id)
+
+    elif text == "/help":
+        msg = """🤖 <b>Bot buyruqlari:</b>
+━━━━━━━━━━━━━━━━━━━━━
+/status — ochiq positionlar
+/stats  — umumiy statistika
+/top    — hozirgi top coinlar
+/stop   — botni to'xtatish
+/help   — yordam"""
+        send_telegram(msg, chat_id)
+
+
+def telegram_listener():
+    global TELEGRAM_OFFSET
+    logger.info("📱 Telegram listener ishga tushdi")
+    while BOT_RUNNING:
+        try:
+            updates = get_telegram_updates()
+            for update in updates:
+                TELEGRAM_OFFSET = update['update_id'] + 1
+                msg = update.get('message', {})
+                text = msg.get('text', '')
+                chat_id = str(msg.get('chat', {}).get('id', ''))
+                if text.startswith('/'):
+                    handle_command(text, chat_id)
+            time.sleep(2)
+        except Exception as e:
+            logger.error(f"❌ Telegram listener xatosi: {e}")
+            time.sleep(5)
+
+
+# ─── MARKET ──────────────────────────────────────────────────────────────────
 
 def get_volatile_symbols(n=TOP_N):
-    """Binance Futures'dan real vaqtda eng volatile N ta coin"""
     try:
         tickers = client.futures_ticker()
         usdt_pairs = [
             t for t in tickers
             if t['symbol'].endswith('USDT')
-            and float(t['quoteVolume']) > 5_000_000  # Min $5M hajm
+            and float(t['quoteVolume']) > 5_000_000
         ]
-        # Absolut % o'zgarish bo'yicha saralash
         usdt_pairs.sort(key=lambda x: abs(float(x['priceChangePercent'])), reverse=True)
         symbols = [t['symbol'] for t in usdt_pairs[:n]]
         logger.info(f"🔥 Top {n} volatile: {', '.join(symbols)}")
         return symbols
     except Exception as e:
         logger.error(f"❌ Volatile symbols xatosi: {e}")
-        # Fallback
         return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
-
-
-def send_telegram(msg):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=10)
-    except Exception as e:
-        logger.error(f"❌ Telegram xatosi: {e}")
 
 
 def calculate_rsi(prices, period=14):
@@ -84,11 +190,8 @@ def calculate_rsi(prices, period=14):
         delta = deltas[i]
         up = (up * 13 + (delta if delta > 0 else 0)) / 14
         down = (down * 13 + (-delta if delta < 0 else 0)) / 14
-        if down == 0:
-            rsi = 100
-        else:
-            rs = up / down
-            rsi = 100 - (100 / (1 + rs))
+        rs = up / down if down != 0 else 0
+        rsi = 100 - (100 / (1 + rs))
     return rsi
 
 
@@ -97,54 +200,69 @@ def get_market_data(symbol):
         ticker = client.futures_symbol_ticker(symbol=symbol)
         current_price = float(ticker['price'])
 
-        klines = client.futures_klines(symbol=symbol, interval='1h', limit=24)
-        closes = [float(k[4]) for k in klines]
-        highs = [float(k[2]) for k in klines]
-        lows = [float(k[3]) for k in klines]
-        volumes = [float(k[7]) for k in klines]
+        # 1h ma'lumot
+        klines_1h = client.futures_klines(symbol=symbol, interval='1h', limit=24)
+        closes_1h = [float(k[4]) for k in klines_1h]
+        highs_1h = [float(k[2]) for k in klines_1h]
+        lows_1h = [float(k[3]) for k in klines_1h]
+        volumes_1h = [float(k[7]) for k in klines_1h]
 
-        highest_high_4h = max(highs[-4:])
-        lowest_low_4h = min(lows[-4:])
-        avg_volume_4h = sum(volumes[-4:]) / 4
-        volume_spike = volumes[-1] / avg_volume_4h if avg_volume_4h > 0 else 1
+        # 15m ma'lumot
+        klines_15m = client.futures_klines(symbol=symbol, interval='15m', limit=24)
+        closes_15m = [float(k[4]) for k in klines_15m]
+        volumes_15m = [float(k[7]) for k in klines_15m]
+
+        avg_vol_1h = sum(volumes_1h[-4:]) / 4
+        avg_vol_15m = sum(volumes_15m[-4:]) / 4
+        vol_spike_1h = volumes_1h[-1] / avg_vol_1h if avg_vol_1h > 0 else 1
+        vol_spike_15m = volumes_15m[-1] / avg_vol_15m if avg_vol_15m > 0 else 1
 
         return {
             "symbol": symbol,
             "current_price": current_price,
-            "highest_high_4h": highest_high_4h,
-            "lowest_low_4h": lowest_low_4h,
-            "avg_volume_4h": avg_volume_4h,
-            "volume_spike": volume_spike,
-            "current_volume": volumes[-1],
-            "price_change_4h": ((closes[-1] - closes[-4]) / closes[-4]) * 100 if closes[-4] != 0 else 0,
-            "rsi": calculate_rsi(closes)
+            "highest_high_4h": max(highs_1h[-4:]),
+            "lowest_low_4h": min(lows_1h[-4:]),
+            "price_change_1h": ((closes_1h[-1] - closes_1h[-2]) / closes_1h[-2]) * 100 if closes_1h[-2] != 0 else 0,
+            "price_change_4h": ((closes_1h[-1] - closes_1h[-4]) / closes_1h[-4]) * 100 if closes_1h[-4] != 0 else 0,
+            "rsi_1h": calculate_rsi(closes_1h),
+            "rsi_15m": calculate_rsi(closes_15m),
+            "vol_spike_1h": vol_spike_1h,
+            "vol_spike_15m": vol_spike_15m,
         }
     except Exception as e:
         logger.error(f"❌ {symbol} market data xatosi: {e}")
         return None
 
 
+# ─── CLAUDE AI ───────────────────────────────────────────────────────────────
+
 def analyze_with_claude(market_data):
     try:
         symbol = market_data['symbol']
-        prompt = f"""
-Sen professional Smart Money Futures trader. {symbol} uchun SHORT signal ber.
+        prompt = f"""Sen professional Smart Money Futures trader. {symbol} uchun signal ber.
 
-Market Data:
-- Symbol: {symbol}
-- Current Price: ${market_data['current_price']:,.4f}
-- Highest High (4h): ${market_data['highest_high_4h']:,.4f}
-- Lowest Low (4h): ${market_data['lowest_low_4h']:,.4f}
-- Price Change (4h): {market_data['price_change_4h']:.2f}%
-- RSI: {market_data['rsi']:.2f}
-- Volume Spike: {market_data['volume_spike']:.2f}x
+MULTI-TIMEFRAME MA'LUMOT:
+Symbol: {symbol}
+Narx: ${market_data['current_price']:,.6f}
 
-Smart Money analiz: Liquidity, Supply/Demand, Order Flow, Market Structure, Volume.
-Position: {POSITION_SIZE} USDT | Leverage: {LEVERAGE}x | SL: {STOP_LOSS_PERCENT}% | TP: {TAKE_PROFIT_PERCENT}%
+📊 1H Timeframe:
+- RSI (1h): {market_data['rsi_1h']:.2f}
+- Volume Spike (1h): {market_data['vol_spike_1h']:.2f}x
+- Narx o'zgarish (4h): {market_data['price_change_4h']:.2f}%
+- Highest High (4h): ${market_data['highest_high_4h']:,.6f}
+- Lowest Low (4h): ${market_data['lowest_low_4h']:,.6f}
 
-FAQAT JSON (O'zbek tilida):
+📊 15M Timeframe:
+- RSI (15m): {market_data['rsi_15m']:.2f}
+- Volume Spike (15m): {market_data['vol_spike_15m']:.2f}x
+- Narx o'zgarish (1h): {market_data['price_change_1h']:.2f}%
+
+Smart Money tahlil: Liquidity, Supply/Demand, Order Flow, Market Structure.
+Size: {POSITION_SIZE} USDT | Leverage: {LEVERAGE}x | SL: {STOP_LOSS_PERCENT}% | TP: {TAKE_PROFIT_PERCENT}%
+
+FAQAT JSON (O'zbek tilida), boshqa hech narsa yozmang:
 {{
-    "action": "SHORT" yoki "HOLD",
+    "action": "LONG" yoki "SHORT" yoki "HOLD",
     "confidence": 0-100,
     "reason": "sabab",
     "entry_price": {market_data['current_price']},
@@ -175,7 +293,7 @@ FAQAT JSON (O'zbek tilida):
             if json_start != -1 and json_end > json_start:
                 return json.loads(text[json_start:json_end])
 
-        logger.error(f"❌ Claude API xatosi ({symbol}): {response.text}")
+        logger.error(f"❌ Claude API xatosi ({symbol}): {response.text[:200]}")
         return None
 
     except Exception as e:
@@ -183,12 +301,13 @@ FAQAT JSON (O'zbek tilida):
         return None
 
 
-def open_position(symbol, analysis):
-    global ACTIVE_POSITIONS
+# ─── POSITION MANAGEMENT ─────────────────────────────────────────────────────
 
+def open_position(symbol, analysis):
     if symbol in ACTIVE_POSITIONS:
         return False
 
+    action = analysis['action']
     entry = float(analysis['entry_price'])
     sl = float(analysis['stop_loss'])
     tp = float(analysis['take_profit'])
@@ -198,7 +317,7 @@ def open_position(symbol, analysis):
     position = {
         "timestamp": datetime.now().isoformat(),
         "symbol": symbol,
-        "type": "SHORT",
+        "type": action,
         "status": "OPEN",
         "entry_price": entry,
         "stop_loss": sl,
@@ -207,51 +326,56 @@ def open_position(symbol, analysis):
         "confidence": analysis['confidence'],
         "reason": analysis['reason'],
         "risk_amount": risk,
-        "risk_reward": analysis['risk_reward_ratio'],
+        "risk_reward": analysis.get('risk_reward_ratio', 0),
         "pnl": 0
     }
 
     ACTIVE_POSITIONS[symbol] = position
     TRADES.append(position)
 
+    emoji = "🔴" if action == "SHORT" else "🟢"
     msg = f"""
-🔴 SHORT SIGNAL: {symbol}
+{emoji} <b>{action} SIGNAL: {symbol}</b>
 {'━' * 35}
-📊 Entry:       ${entry:,.4f}
-🎯 Take Profit: ${tp:,.4f}
-🛑 Stop Loss:   ${sl:,.4f}
+📊 Entry:       ${entry:,.6f}
+🎯 Take Profit: ${tp:,.6f}
+🛑 Stop Loss:   ${sl:,.6f}
 💰 Size: ${POSITION_SIZE} | Leverage: {LEVERAGE}x
 💸 Risk: ${risk:.2f}
-📈 R/R: {analysis['risk_reward_ratio']:.2f}
+📈 R/R: {analysis.get('risk_reward_ratio', 0):.2f}
 💪 Confidence: {analysis['confidence']}%
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 💡 {analysis['reason']}
 🕐 {position['timestamp'][:19]}
 """
     send_telegram(msg)
-    logger.info(f"🔴 SHORT ochildi: {symbol} @ ${entry:,.4f}")
+    logger.info(f"{emoji} {action} ochildi: {symbol} @ ${entry:,.6f}")
     return True
 
 
 def monitor_positions():
-    global ACTIVE_POSITIONS
-
     to_close = []
-
     for symbol, pos in ACTIVE_POSITIONS.items():
         try:
             ticker = client.futures_symbol_ticker(symbol=symbol)
-            current_price = float(ticker['price'])
-
+            cur = float(ticker['price'])
             entry = pos['entry_price']
-            pnl_pct = ((entry - current_price) / entry) * 100
-            pnl_amt = pnl_pct * POSITION_SIZE / 100
-            pos['pnl'] = pnl_amt
 
-            if current_price <= pos['take_profit']:
-                to_close.append((symbol, "TAKE_PROFIT", current_price))
-            elif current_price >= pos['stop_loss']:
-                to_close.append((symbol, "STOP_LOSS", current_price))
+            if pos['type'] == 'SHORT':
+                pnl_pct = ((entry - cur) / entry) * 100
+                hit_tp = cur <= pos['take_profit']
+                hit_sl = cur >= pos['stop_loss']
+            else:  # LONG
+                pnl_pct = ((cur - entry) / entry) * 100
+                hit_tp = cur >= pos['take_profit']
+                hit_sl = cur <= pos['stop_loss']
+
+            pos['pnl'] = pnl_pct * POSITION_SIZE / 100
+
+            if hit_tp:
+                to_close.append((symbol, "TAKE_PROFIT", cur))
+            elif hit_sl:
+                to_close.append((symbol, "STOP_LOSS", cur))
 
         except Exception as e:
             logger.error(f"❌ Monitor xatosi ({symbol}): {e}")
@@ -261,23 +385,26 @@ def monitor_positions():
 
 
 def close_position(symbol, reason, current_price):
-    global ACTIVE_POSITIONS
-
     pos = ACTIVE_POSITIONS.pop(symbol, None)
     if not pos:
         return
 
     entry = pos['entry_price']
-    pnl_pct = ((entry - current_price) / entry) * 100
+    if pos['type'] == 'SHORT':
+        pnl_pct = ((entry - current_price) / entry) * 100
+    else:
+        pnl_pct = ((current_price - entry) / entry) * 100
+
     pnl_amt = pnl_pct * POSITION_SIZE / 100
+    pos['status'] = 'CLOSED'
+    pos['pnl'] = pnl_amt
     emoji = "✅" if pnl_amt > 0 else "❌"
 
     msg = f"""
-{emoji} POSITION YOPILDI: {symbol}
+{emoji} <b>POSITION YOPILDI: {symbol}</b>
 {'━' * 35}
-🎯 Reason: {reason}
-Entry: ${entry:,.4f}
-Exit:  ${current_price:,.4f}
+🎯 Sabab: {reason}
+📊 {pos['type']}: ${entry:,.6f} → ${current_price:,.6f}
 {'🟢' if pnl_amt > 0 else '🔴'} PnL: {pnl_pct:+.2f}% (${pnl_amt:+,.2f})
 🕐 {datetime.now().isoformat()[:19]}
 """
@@ -285,44 +412,84 @@ Exit:  ${current_price:,.4f}
     logger.info(f"{emoji} {symbol} yopildi: {reason} | PnL: {pnl_pct:+.2f}%")
 
 
-def print_stats():
-    closed = [t for t in TRADES if t['status'] == 'CLOSED']
-    if not closed:
-        return
-    wins = sum(1 for t in closed if t['pnl'] > 0)
-    total_pnl = sum(t['pnl'] for t in closed)
-    logger.info(f"📊 Stats: {len(closed)} trades | {wins} win | PnL: ${total_pnl:+,.2f}")
+# ─── DAILY REPORT ─────────────────────────────────────────────────────────────
 
+def send_daily_report():
+    global LAST_REPORT_DATE
+    now = datetime.utcnow()
+
+    if LAST_REPORT_DATE == now.date():
+        return
+    if now.hour != 7:  # Har kuni soat 07:00 UTC (12:00 Toshkent)
+        return
+
+    LAST_REPORT_DATE = now.date()
+    today = now.date()
+
+    today_trades = [
+        t for t in TRADES
+        if t.get('status') == 'CLOSED'
+        and t['timestamp'][:10] == str(today)
+    ]
+
+    if not today_trades:
+        send_telegram(f"📊 <b>Kunlik hisobot ({today})</b>\n\nBugun savdo bo'lmadi.")
+        return
+
+    wins = [t for t in today_trades if t['pnl'] > 0]
+    losses = [t for t in today_trades if t['pnl'] <= 0]
+    total_pnl = sum(t['pnl'] for t in today_trades)
+    win_rate = len(wins) / len(today_trades) * 100
+
+    msg = f"""📊 <b>Kunlik hisobot — {today}</b>
+{'━' * 35}
+📈 Jami savdolar: {len(today_trades)}
+✅ Wins: {len(wins)} | ❌ Losses: {len(losses)}
+🎯 Win Rate: {win_rate:.1f}%
+💰 Kunlik PnL: ${total_pnl:+,.2f}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📌 Ochiq positionlar: {len(ACTIVE_POSITIONS)}"""
+    send_telegram(msg)
+
+
+# ─── MAIN LOOP ────────────────────────────────────────────────────────────────
 
 def trading_loop():
     logger.info("🚀 Smart Money AI Futures Agent ishga tushdi!")
     logger.info(f"📋 Har siklda TOP {TOP_N} volatile coin tahlil qilinadi")
-    logger.info(f"💰 Har bir coin uchun: ${POSITION_SIZE} USDT | {LEVERAGE}x leverage")
+    logger.info(f"💰 Har bir coin: ${POSITION_SIZE} USDT | {LEVERAGE}x | Min confidence: {CONFIDENCE_THRESHOLD}%")
 
     send_telegram(f"""
-🚀 Smart Money AI Futures Agent ishga tushdi!
+🚀 <b>Smart Money AI Futures Agent ishga tushdi!</b>
 {'━' * 35}
 🔥 Har siklda TOP {TOP_N} volatile coin
 💰 Har bir coin: ${POSITION_SIZE} USDT ({LEVERAGE}x)
-🎯 Faqat SHORT signallar
-⏰ Har 5 daqiqada tahlil
+🎯 LONG va SHORT signallar
+⏰ Tahlil: 15m + 1h multi-timeframe
+💪 Min confidence: {CONFIDENCE_THRESHOLD}%
 🛑 Stop Loss: {STOP_LOSS_PERCENT}% | TP: {TAKE_PROFIT_PERCENT}%
-📊 Min confidence: {CONFIDENCE_THRESHOLD}%
-""")
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📱 Buyruqlar: /help""")
 
-    while True:
+    # Telegram listener alohida threadda
+    listener_thread = threading.Thread(target=telegram_listener, daemon=True)
+    listener_thread.start()
+
+    while BOT_RUNNING:
         try:
-            # Ochiq positionlarni kuzat
             if ACTIVE_POSITIONS:
                 monitor_positions()
 
-            # Real vaqtda eng volatile coinlarni ol
+            send_daily_report()
+
             symbols = get_volatile_symbols(TOP_N)
 
-            # Har bir coinni tahlil qil
             for symbol in symbols:
+                if not BOT_RUNNING:
+                    break
+
                 if symbol in ACTIVE_POSITIONS:
-                    logger.info(f"⏭️ {symbol} — ochiq position bor, o'tkazildi")
+                    logger.info(f"⏭️ {symbol} — ochiq position bor")
                     continue
 
                 market_data = get_market_data(symbol)
@@ -333,22 +500,29 @@ def trading_loop():
                 if not analysis:
                     continue
 
-                logger.info(f"📊 {symbol}: {analysis['action']} | Confidence: {analysis['confidence']}% | RSI: {market_data['rsi']:.1f}")
+                action = analysis.get('action', 'HOLD')
+                confidence = analysis.get('confidence', 0)
 
-                if analysis['action'] == 'SHORT' and analysis['confidence'] >= CONFIDENCE_THRESHOLD:
+                logger.info(f"📊 {symbol}: {action} | {confidence}% | RSI 1h:{market_data['rsi_1h']:.1f} 15m:{market_data['rsi_15m']:.1f}")
+
+                if action in ('LONG', 'SHORT') and confidence >= CONFIDENCE_THRESHOLD:
                     open_position(symbol, analysis)
 
-                # Claude rate limit uchun kutish
                 time.sleep(3)
 
-            print_stats()
-            logger.info(f"⏳ 5 minutdan keyin yana tahlil... | Ochiq: {len(ACTIVE_POSITIONS)} position | Tahlil: {len(symbols)} coin")
+            closed = [t for t in TRADES if t.get('status') == 'CLOSED']
+            wins = sum(1 for t in closed if t['pnl'] > 0)
+            total_pnl = sum(t['pnl'] for t in closed)
+            logger.info(f"⏳ 5 daqiqa kutish | Ochiq: {len(ACTIVE_POSITIONS)} | Jami PnL: ${total_pnl:+,.2f} | Wins: {wins}/{len(closed)}")
             time.sleep(300)
 
         except Exception as e:
             logger.error(f"❌ Loop xatosi: {e}")
             send_telegram(f"❌ Bot xatosi: {e}")
             time.sleep(60)
+
+    send_telegram("🛑 Bot to'xtatildi.")
+    logger.info("🛑 Bot to'xtatildi.")
 
 
 if __name__ == "__main__":
