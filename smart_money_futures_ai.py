@@ -23,8 +23,8 @@ CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
 TOP_N = 20
 POSITION_SIZE = 50
 LEVERAGE = 4
-STOP_LOSS_PERCENT = 2
-TAKE_PROFIT_PERCENT = 6
+STOP_LOSS_PERCENT = 3     # 3% stop loss
+TAKE_PROFIT_PERCENT = 10  # 10% yurish maqsad
 CONFIDENCE_THRESHOLD = 75  # 75%+ kerak
 
 if not all([API_KEY, API_SECRET, TELEGRAM_TOKEN, CHAT_ID, CLAUDE_API_KEY]):
@@ -276,6 +276,12 @@ Narx: ${market_data['current_price']:,.6f}
 
 Smart Money tahlil: Liquidity, Supply/Demand, Order Flow, Market Structure.
 Size: {POSITION_SIZE} USDT | Leverage: {LEVERAGE}x | SL: {STOP_LOSS_PERCENT}% | TP: {TAKE_PROFIT_PERCENT}%
+
+MUHIM QOIDA:
+- Faqat narx {TAKE_PROFIT_PERCENT}% yurishi ANIQ bo'lganda LONG yoki SHORT ber
+- Agar {TAKE_PROFIT_PERCENT}% yurish ko'rinmasa — HOLD ber
+- Take profit = entry narxdan aynan {TAKE_PROFIT_PERCENT}% uzoqda bo'lsin
+- Confidence = shu {TAKE_PROFIT_PERCENT}% yurish bo'lishiga ishonch darajasi
 
 FAQAT JSON (O'zbek tilida), boshqa hech narsa yozmang:
 {{
