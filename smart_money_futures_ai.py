@@ -437,7 +437,7 @@ def send_daily_report():
 
     if LAST_REPORT_DATE == now.date():
         return
-    if now.hour != 7:  # Har kuni soat 07:00 UTC (12:00 Toshkent)
+    if now.hour != 19:  # Har kuni soat 19:00 UTC (00:00 Toshkent)
         return
 
     LAST_REPORT_DATE = now.date()
