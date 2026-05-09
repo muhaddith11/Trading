@@ -498,7 +498,7 @@ def trading_loop():
 🔥 Har siklda TOP {TOP_N} volatile coin
 💰 Har bir coin: ${POSITION_SIZE} USDT ({LEVERAGE}x)
 🎯 LONG va SHORT signallar
-⏰ Tahlil: 15m + 1h + 4h multi-timeframe
+⏰ Har 2 soatda tahlil (15m+1h+4h)
 💪 Min confidence: {CONFIDENCE_THRESHOLD}%
 🛑 Stop Loss: {STOP_LOSS_PERCENT}% | TP: {TAKE_PROFIT_PERCENT}%
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -546,8 +546,8 @@ def trading_loop():
             closed = [t for t in TRADES if t.get('status') == 'CLOSED']
             wins = sum(1 for t in closed if t['pnl'] > 0)
             total_pnl = sum(t['pnl'] for t in closed)
-            logger.info(f"⏳ 5 daqiqa kutish | Ochiq: {len(ACTIVE_POSITIONS)} | Jami PnL: ${total_pnl:+,.2f} | Wins: {wins}/{len(closed)}")
-            time.sleep(300)
+            logger.info(f"⏳ 2 soat kutish | Ochiq: {len(ACTIVE_POSITIONS)} | Jami PnL: ${total_pnl:+,.2f} | Wins: {wins}/{len(closed)}")
+            time.sleep(7200)
 
         except Exception as e:
             logger.error(f"❌ Loop xatosi: {e}")
