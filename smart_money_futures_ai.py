@@ -19,16 +19,8 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
 
-# Top 20 Futures coins (eng likvid)
-SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
-    "UNIUSDT", "ATOMUSDT", "LTCUSDT", "NEARUSDT", "APTUSDT",
-    "ARBUSDT", "OPUSDT", "SUIUSDT", "INJUSDT", "TIAUSDT"
-]
-
-TOTAL_BALANCE = 1000
-POSITION_SIZE = 50   # Har bir coin uchun 50 USDT (20 coin x 50 = 1000)
+TOP_N = 20              # Eng volatile N ta coin
+POSITION_SIZE = 50      # Har bir coin uchun USDT
 LEVERAGE = 4
 STOP_LOSS_PERCENT = 2
 TAKE_PROFIT_PERCENT = 6
@@ -47,6 +39,26 @@ except Exception as e:
 
 TRADES = []
 ACTIVE_POSITIONS = {}  # {symbol: position}
+
+
+def get_volatile_symbols(n=TOP_N):
+    """Binance Futures'dan real vaqtda eng volatile N ta coin"""
+    try:
+        tickers = client.futures_ticker()
+        usdt_pairs = [
+            t for t in tickers
+            if t['symbol'].endswith('USDT')
+            and float(t['quoteVolume']) > 5_000_000  # Min $5M hajm
+        ]
+        # Absolut % o'zgarish bo'yicha saralash
+        usdt_pairs.sort(key=lambda x: abs(float(x['priceChangePercent'])), reverse=True)
+        symbols = [t['symbol'] for t in usdt_pairs[:n]]
+        logger.info(f"🔥 Top {n} volatile: {', '.join(symbols)}")
+        return symbols
+    except Exception as e:
+        logger.error(f"❌ Volatile symbols xatosi: {e}")
+        # Fallback
+        return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
 
 
 def send_telegram(msg):
@@ -290,15 +302,12 @@ def trading_loop():
     send_telegram(f"""
 🚀 Smart Money AI Futures Agent ishga tushdi!
 {'━' * 35}
-📋 Coinlar: {len(SYMBOLS)} ta
+🔥 Har siklda TOP {TOP_N} volatile coin
 💰 Har bir coin: ${POSITION_SIZE} USDT ({LEVERAGE}x)
 🎯 Faqat SHORT signallar
 ⏰ Har 5 daqiqada tahlil
 🛑 Stop Loss: {STOP_LOSS_PERCENT}% | TP: {TAKE_PROFIT_PERCENT}%
 📊 Min confidence: {CONFIDENCE_THRESHOLD}%
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🪙 {' | '.join(SYMBOLS[:10])}
-   {' | '.join(SYMBOLS[10:])}
 """)
 
     while True:
@@ -307,8 +316,11 @@ def trading_loop():
             if ACTIVE_POSITIONS:
                 monitor_positions()
 
+            # Real vaqtda eng volatile coinlarni ol
+            symbols = get_volatile_symbols(TOP_N)
+
             # Har bir coinni tahlil qil
-            for symbol in SYMBOLS:
+            for symbol in symbols:
                 if symbol in ACTIVE_POSITIONS:
                     logger.info(f"⏭️ {symbol} — ochiq position bor, o'tkazildi")
                     continue
@@ -330,7 +342,7 @@ def trading_loop():
                 time.sleep(3)
 
             print_stats()
-            logger.info(f"⏳ 5 minutdan keyin yana tahlil... | Ochiq: {len(ACTIVE_POSITIONS)} position")
+            logger.info(f"⏳ 5 minutdan keyin yana tahlil... | Ochiq: {len(ACTIVE_POSITIONS)} position | Tahlil: {len(symbols)} coin")
             time.sleep(300)
 
         except Exception as e:
