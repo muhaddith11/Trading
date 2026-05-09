@@ -212,22 +212,34 @@ def get_market_data(symbol):
         closes_15m = [float(k[4]) for k in klines_15m]
         volumes_15m = [float(k[7]) for k in klines_15m]
 
+        # 4h ma'lumot
+        klines_4h = client.futures_klines(symbol=symbol, interval='4h', limit=12)
+        closes_4h = [float(k[4]) for k in klines_4h]
+        highs_4h = [float(k[2]) for k in klines_4h]
+        lows_4h = [float(k[3]) for k in klines_4h]
+        volumes_4h = [float(k[7]) for k in klines_4h]
+
         avg_vol_1h = sum(volumes_1h[-4:]) / 4
         avg_vol_15m = sum(volumes_15m[-4:]) / 4
+        avg_vol_4h = sum(volumes_4h[-3:]) / 3
         vol_spike_1h = volumes_1h[-1] / avg_vol_1h if avg_vol_1h > 0 else 1
         vol_spike_15m = volumes_15m[-1] / avg_vol_15m if avg_vol_15m > 0 else 1
+        vol_spike_4h = volumes_4h[-1] / avg_vol_4h if avg_vol_4h > 0 else 1
 
         return {
             "symbol": symbol,
             "current_price": current_price,
-            "highest_high_4h": max(highs_1h[-4:]),
-            "lowest_low_4h": min(lows_1h[-4:]),
+            "highest_high_4h": max(highs_4h[-3:]),
+            "lowest_low_4h": min(lows_4h[-3:]),
+            "price_change_15m": ((closes_15m[-1] - closes_15m[-2]) / closes_15m[-2]) * 100 if closes_15m[-2] != 0 else 0,
             "price_change_1h": ((closes_1h[-1] - closes_1h[-2]) / closes_1h[-2]) * 100 if closes_1h[-2] != 0 else 0,
-            "price_change_4h": ((closes_1h[-1] - closes_1h[-4]) / closes_1h[-4]) * 100 if closes_1h[-4] != 0 else 0,
-            "rsi_1h": calculate_rsi(closes_1h),
+            "price_change_4h": ((closes_4h[-1] - closes_4h[-2]) / closes_4h[-2]) * 100 if closes_4h[-2] != 0 else 0,
             "rsi_15m": calculate_rsi(closes_15m),
-            "vol_spike_1h": vol_spike_1h,
+            "rsi_1h": calculate_rsi(closes_1h),
+            "rsi_4h": calculate_rsi(closes_4h),
             "vol_spike_15m": vol_spike_15m,
+            "vol_spike_1h": vol_spike_1h,
+            "vol_spike_4h": vol_spike_4h,
         }
     except Exception as e:
         logger.error(f"❌ {symbol} market data xatosi: {e}")
@@ -245,17 +257,22 @@ MULTI-TIMEFRAME MA'LUMOT:
 Symbol: {symbol}
 Narx: ${market_data['current_price']:,.6f}
 
-📊 1H Timeframe:
-- RSI (1h): {market_data['rsi_1h']:.2f}
-- Volume Spike (1h): {market_data['vol_spike_1h']:.2f}x
+📊 4H Timeframe (asosiy trend):
+- RSI (4h): {market_data['rsi_4h']:.2f}
+- Volume Spike (4h): {market_data['vol_spike_4h']:.2f}x
 - Narx o'zgarish (4h): {market_data['price_change_4h']:.2f}%
 - Highest High (4h): ${market_data['highest_high_4h']:,.6f}
 - Lowest Low (4h): ${market_data['lowest_low_4h']:,.6f}
 
-📊 15M Timeframe:
+📊 1H Timeframe (kirish zona):
+- RSI (1h): {market_data['rsi_1h']:.2f}
+- Volume Spike (1h): {market_data['vol_spike_1h']:.2f}x
+- Narx o'zgarish (1h): {market_data['price_change_1h']:.2f}%
+
+📊 15M Timeframe (aniq kirish):
 - RSI (15m): {market_data['rsi_15m']:.2f}
 - Volume Spike (15m): {market_data['vol_spike_15m']:.2f}x
-- Narx o'zgarish (1h): {market_data['price_change_1h']:.2f}%
+- Narx o'zgarish (15m): {market_data['price_change_15m']:.2f}%
 
 Smart Money tahlil: Liquidity, Supply/Demand, Order Flow, Market Structure.
 Size: {POSITION_SIZE} USDT | Leverage: {LEVERAGE}x | SL: {STOP_LOSS_PERCENT}% | TP: {TAKE_PROFIT_PERCENT}%
@@ -465,7 +482,7 @@ def trading_loop():
 🔥 Har siklda TOP {TOP_N} volatile coin
 💰 Har bir coin: ${POSITION_SIZE} USDT ({LEVERAGE}x)
 🎯 LONG va SHORT signallar
-⏰ Tahlil: 15m + 1h multi-timeframe
+⏰ Tahlil: 15m + 1h + 4h multi-timeframe
 💪 Min confidence: {CONFIDENCE_THRESHOLD}%
 🛑 Stop Loss: {STOP_LOSS_PERCENT}% | TP: {TAKE_PROFIT_PERCENT}%
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -503,7 +520,7 @@ def trading_loop():
                 action = analysis.get('action', 'HOLD')
                 confidence = analysis.get('confidence', 0)
 
-                logger.info(f"📊 {symbol}: {action} | {confidence}% | RSI 1h:{market_data['rsi_1h']:.1f} 15m:{market_data['rsi_15m']:.1f}")
+                logger.info(f"📊 {symbol}: {action} | {confidence}% | RSI 4h:{market_data['rsi_4h']:.1f} 1h:{market_data['rsi_1h']:.1f} 15m:{market_data['rsi_15m']:.1f}")
 
                 if action in ('LONG', 'SHORT') and confidence >= CONFIDENCE_THRESHOLD:
                     open_position(symbol, analysis)
