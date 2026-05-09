@@ -1,0 +1,1 @@
+worker: python smart_money_futures_ai.py
