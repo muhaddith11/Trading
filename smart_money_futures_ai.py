@@ -316,7 +316,17 @@ FAQAT JSON (O'zbek tilida), boshqa hech narsa yozmang:
             if json_start != -1 and json_end > json_start:
                 return json.loads(text[json_start:json_end])
 
-        logger.error(f"❌ Claude API xatosi ({symbol}): {response.text[:200]}")
+        # Kredit tugagan bo'lsa Telegram'ga xabar yuborish
+        error_text = response.text
+        if 'credit balance is too low' in error_text or 'insufficient_quota' in error_text:
+            send_telegram(
+                "⚠️ <b>DIQQAT: Claude API krediti tugadi!</b>\n\n"
+                "Bot ishlashni to'xtatdi.\n"
+                "console.anthropic.com/settings/billing da kredit soling."
+            )
+            logger.error("⚠️ Claude API krediti tugadi! Telegram xabar yuborildi.")
+
+        logger.error(f"❌ Claude API xatosi ({symbol}): {error_text[:200]}")
         return None
 
     except Exception as e:
