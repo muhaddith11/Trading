@@ -21,11 +21,11 @@ CHAT_ID = os.environ.get('CHAT_ID')
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
 
 TOP_N = 20
-POSITION_SIZE = 50
 LEVERAGE = 4
-STOP_LOSS_PERCENT = 3     # 3% stop loss
-TAKE_PROFIT_PERCENT = 10  # 10% yurish maqsad
-CONFIDENCE_THRESHOLD = 75  # 75%+ kerak
+STOP_LOSS_PERCENT = 3
+TAKE_PROFIT_PERCENT = 10
+CONFIDENCE_THRESHOLD = 75
+BALANCE_PERCENT = 0.25  # Har savdoga balansning 25%
 
 if not all([API_KEY, API_SECRET, TELEGRAM_TOKEN, CHAT_ID, CLAUDE_API_KEY]):
     logger.error("❌ Environment variables to'liq emas!")
@@ -157,6 +157,21 @@ def telegram_listener():
 
 
 # ─── MARKET ──────────────────────────────────────────────────────────────────
+
+def get_free_balance():
+    """Binance Futures'dagi bo'sh USDT balansini olish"""
+    try:
+        account = client.futures_account_balance()
+        for asset in account:
+            if asset['asset'] == 'USDT':
+                balance = float(asset['availableBalance'])
+                logger.info(f"💰 Bo'sh balans: ${balance:.2f} USDT")
+                return balance
+        return 0
+    except Exception as e:
+        logger.error(f"❌ Balans olish xatosi: {e}")
+        return 0
+
 
 def get_volatile_symbols(n=TOP_N):
     try:
@@ -336,7 +351,7 @@ FAQAT JSON (O'zbek tilida), boshqa hech narsa yozmang:
 
 # ─── POSITION MANAGEMENT ─────────────────────────────────────────────────────
 
-def open_position(symbol, analysis):
+def open_position(symbol, analysis, position_size):
     if symbol in ACTIVE_POSITIONS:
         return False
 
@@ -344,8 +359,8 @@ def open_position(symbol, analysis):
     entry = float(analysis['entry_price'])
     sl = float(analysis['stop_loss'])
     tp = float(analysis['take_profit'])
-    quantity = round(POSITION_SIZE * LEVERAGE / entry, 4)
-    risk = POSITION_SIZE * (STOP_LOSS_PERCENT / 100)
+    quantity = round(position_size * LEVERAGE / entry, 4)
+    risk = position_size * (STOP_LOSS_PERCENT / 100)
 
     position = {
         "timestamp": datetime.now().isoformat(),
@@ -358,6 +373,7 @@ def open_position(symbol, analysis):
         "quantity": quantity,
         "confidence": analysis['confidence'],
         "reason": analysis['reason'],
+        "position_size": position_size,
         "risk_amount": risk,
         "risk_reward": analysis.get('risk_reward_ratio', 0),
         "pnl": 0
@@ -373,7 +389,7 @@ def open_position(symbol, analysis):
 📊 Entry:       ${entry:,.6f}
 🎯 Take Profit: ${tp:,.6f}
 🛑 Stop Loss:   ${sl:,.6f}
-💰 Size: ${POSITION_SIZE} | Leverage: {LEVERAGE}x
+💰 Size: ${position_size} | Leverage: {LEVERAGE}x | Exposure: ${position_size * LEVERAGE:.2f}
 💸 Risk: ${risk:.2f}
 📈 R/R: {analysis.get('risk_reward_ratio', 0):.2f}
 💪 Confidence: {analysis['confidence']}%
@@ -428,7 +444,7 @@ def close_position(symbol, reason, current_price):
     else:
         pnl_pct = ((current_price - entry) / entry) * 100
 
-    pnl_amt = pnl_pct * POSITION_SIZE / 100
+    pnl_amt = pnl_pct * pos.get('position_size', 50) / 100
     pos['status'] = 'CLOSED'
     pos['pnl'] = pnl_amt
     emoji = "✅" if pnl_amt > 0 else "❌"
@@ -515,6 +531,18 @@ def trading_loop():
 
             send_daily_report()
 
+            # Haqiqiy balansni ol va 25% hisoblа
+            free_balance = get_free_balance()
+            position_size = round(free_balance * BALANCE_PERCENT, 2)
+
+            if position_size < 5:
+                logger.warning(f"⚠️ Balans juda kam: ${free_balance:.2f} → savdo qilib bo'lmaydi")
+                send_telegram(f"⚠️ Balans juda kam: ${free_balance:.2f}\nMinimal $20 USDT kerak.")
+                time.sleep(7200)
+                continue
+
+            logger.info(f"📐 Position size: ${position_size} (balans ${free_balance:.2f} ning 25%) × {LEVERAGE}x = ${position_size * LEVERAGE:.2f} exposure")
+
             symbols = get_volatile_symbols(TOP_N)
 
             for symbol in symbols:
@@ -539,7 +567,7 @@ def trading_loop():
                 logger.info(f"📊 {symbol}: {action} | {confidence}% | RSI 4h:{market_data['rsi_4h']:.1f} 1h:{market_data['rsi_1h']:.1f} 15m:{market_data['rsi_15m']:.1f}")
 
                 if action in ('LONG', 'SHORT') and confidence >= CONFIDENCE_THRESHOLD:
-                    open_position(symbol, analysis)
+                    open_position(symbol, analysis, position_size)
 
                 time.sleep(3)
 
