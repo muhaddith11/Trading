@@ -26,6 +26,7 @@ STOP_LOSS_PERCENT = 3
 TAKE_PROFIT_PERCENT = 10
 CONFIDENCE_THRESHOLD = 75
 BALANCE_PERCENT = 0.25  # Har savdoga balansning 25%
+MAX_POSITIONS = 2       # Bir vaqtda max 2 ta ochiq pozitsiya
 
 if not all([API_KEY, API_SECRET, TELEGRAM_TOKEN, CHAT_ID, CLAUDE_API_KEY]):
     logger.error("❌ Environment variables to'liq emas!")
@@ -524,58 +525,74 @@ def trading_loop():
     listener_thread = threading.Thread(target=telegram_listener, daemon=True)
     listener_thread.start()
 
+    def analyze_and_open():
+        """Yangi pozitsiya ochish uchun tahlil"""
+        if len(ACTIVE_POSITIONS) >= MAX_POSITIONS:
+            return
+
+        free_balance = get_free_balance()
+        position_size = round(free_balance * BALANCE_PERCENT, 2)
+
+        if position_size < 5:
+            logger.warning(f"⚠️ Balans juda kam: ${free_balance:.2f}")
+            send_telegram(f"⚠️ Balans juda kam: ${free_balance:.2f}\nMinimal $20 USDT kerak.")
+            return
+
+        logger.info(f"📐 Position size: ${position_size} (${free_balance:.2f} ning 25%) × {LEVERAGE}x = ${position_size * LEVERAGE:.2f}")
+
+        symbols = get_volatile_symbols(TOP_N)
+        opened = 0
+        needed = MAX_POSITIONS - len(ACTIVE_POSITIONS)
+
+        for symbol in symbols:
+            if not BOT_RUNNING or opened >= needed:
+                break
+            if symbol in ACTIVE_POSITIONS:
+                continue
+
+            market_data = get_market_data(symbol)
+            if not market_data:
+                continue
+
+            analysis = analyze_with_claude(market_data)
+            if not analysis:
+                continue
+
+            action = analysis.get('action', 'HOLD')
+            confidence = analysis.get('confidence', 0)
+
+            logger.info(f"📊 {symbol}: {action} | {confidence}% | RSI 4h:{market_data['rsi_4h']:.1f} 1h:{market_data['rsi_1h']:.1f} 15m:{market_data['rsi_15m']:.1f}")
+
+            if action in ('LONG', 'SHORT') and confidence >= CONFIDENCE_THRESHOLD:
+                if open_position(symbol, analysis, position_size):
+                    opened += 1
+
+            time.sleep(3)
+
+    # Boshlanishda 2 ta pozitsiya ochishga urinish
+    analyze_and_open()
+
     while BOT_RUNNING:
         try:
+            send_daily_report()
+
+            prev_count = len(ACTIVE_POSITIONS)
+
+            # Pozitsiyalarni kuzat
             if ACTIVE_POSITIONS:
                 monitor_positions()
 
-            send_daily_report()
-
-            # Haqiqiy balansni ol va 25% hisoblа
-            free_balance = get_free_balance()
-            position_size = round(free_balance * BALANCE_PERCENT, 2)
-
-            if position_size < 5:
-                logger.warning(f"⚠️ Balans juda kam: ${free_balance:.2f} → savdo qilib bo'lmaydi")
-                send_telegram(f"⚠️ Balans juda kam: ${free_balance:.2f}\nMinimal $20 USDT kerak.")
-                time.sleep(7200)
-                continue
-
-            logger.info(f"📐 Position size: ${position_size} (balans ${free_balance:.2f} ning 25%) × {LEVERAGE}x = ${position_size * LEVERAGE:.2f} exposure")
-
-            symbols = get_volatile_symbols(TOP_N)
-
-            for symbol in symbols:
-                if not BOT_RUNNING:
-                    break
-
-                if symbol in ACTIVE_POSITIONS:
-                    logger.info(f"⏭️ {symbol} — ochiq position bor")
-                    continue
-
-                market_data = get_market_data(symbol)
-                if not market_data:
-                    continue
-
-                analysis = analyze_with_claude(market_data)
-                if not analysis:
-                    continue
-
-                action = analysis.get('action', 'HOLD')
-                confidence = analysis.get('confidence', 0)
-
-                logger.info(f"📊 {symbol}: {action} | {confidence}% | RSI 4h:{market_data['rsi_4h']:.1f} 1h:{market_data['rsi_1h']:.1f} 15m:{market_data['rsi_15m']:.1f}")
-
-                if action in ('LONG', 'SHORT') and confidence >= CONFIDENCE_THRESHOLD:
-                    open_position(symbol, analysis, position_size)
-
-                time.sleep(3)
+            # Pozitsiya yopilganmi? → darhol yangi tahlil
+            if len(ACTIVE_POSITIONS) < prev_count or len(ACTIVE_POSITIONS) < MAX_POSITIONS:
+                logger.info(f"🔄 Pozitsiya yopildi yoki bo'sh slot bor → yangi tahlil boshlandi")
+                analyze_and_open()
 
             closed = [t for t in TRADES if t.get('status') == 'CLOSED']
             wins = sum(1 for t in closed if t['pnl'] > 0)
             total_pnl = sum(t['pnl'] for t in closed)
-            logger.info(f"⏳ 2 soat kutish | Ochiq: {len(ACTIVE_POSITIONS)} | Jami PnL: ${total_pnl:+,.2f} | Wins: {wins}/{len(closed)}")
-            time.sleep(7200)
+            logger.info(f"⏳ Ochiq: {len(ACTIVE_POSITIONS)}/{MAX_POSITIONS} | PnL: ${total_pnl:+,.2f} | Wins: {wins}/{len(closed)}")
+
+            time.sleep(60)  # Har 1 daqiqada pozitsiyalarni tekshir
 
         except Exception as e:
             logger.error(f"❌ Loop xatosi: {e}")
